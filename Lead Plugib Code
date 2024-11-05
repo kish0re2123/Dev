@@ -1,0 +1,117 @@
+using System;
+using System.Linq;
+using System.Collections.Generic;
+using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
+
+public class ldPlugin : IPlugin
+{
+    public void Execute(IServiceProvider serviceProvider)
+    {
+        // Obtain the execution context
+        IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+
+        // Obtain the organization service
+        IOrganizationServiceFactory serviceFactory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
+        IOrganizationService service = serviceFactory.CreateOrganizationService(context.UserId);
+
+        // Obtain the tracing service
+        ITracingService tracingService = (ITracingService)serviceProvider.GetService(typeof(ITracingService));
+
+        try
+        {
+            // Check if the plugin is triggered for the Lead entity on Create operation
+            if (context.InputParameters.Contains("Target") && context.InputParameters["Target"] is Entity)
+            {
+                Entity lead = (Entity)context.InputParameters["Target"];
+
+                if (lead.LogicalName != "lead")
+                    return;
+
+                if (context.MessageName.ToLower() == "create")
+                {
+                    // Generate a unique ID for the new lead
+                    string uniqueId = GenerateUniqueId(service, tracingService);
+
+                    // Set the unique ID in the custom field
+                    lead["gsi_leadid"] = uniqueId;
+                    tracingService.Trace($"ldPlugin: Generated Unique ID: {uniqueId}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            tracingService.Trace("ldPlugin: Error : {0}", ex.ToString());
+            throw new InvalidPluginExecutionException("An error occurred in ldPlugin.", ex);
+        }
+    }
+
+    private string GenerateUniqueId(IOrganizationService service, ITracingService tracingService)
+    {
+        // Get the current date in ddMMyy format
+        string datePrefix = DateTime.Now.ToString("ddMMyy");
+
+        // Generate the next sequential number
+        string sequentialNumber = GetNextSequentialNumber(service, tracingService);
+
+        // Combine date prefix and sequential number
+        return datePrefix + sequentialNumber;
+    }
+
+    private string GetNextSequentialNumber(IOrganizationService service, ITracingService tracingService)
+    {
+        int highestNumber = 0;
+
+        try
+        {
+            highestNumber = Math.Max(
+                GetHighestNumber(service, "lead", "gsi_leadid", tracingService),
+                GetHighestNumber(service, "opportunity", "gsi_leadid", tracingService)
+            );
+
+            tracingService.Trace($"ldPlugin: Highest number found: {highestNumber}");
+        }
+        catch (Exception ex)
+        {
+            tracingService.Trace("GetNextSequentialNumber: Error : {0}", ex.ToString());
+            // If an error occurs, return a default number
+            return "0000001";
+        }
+
+        // Increment the highest number
+        int nextNumber = highestNumber + 1;
+
+        // Pad the number to ensure it's always 7 digits
+        return nextNumber.ToString("D7");
+    }
+
+    private int GetHighestNumber(IOrganizationService service, string entityName, string fieldName, ITracingService tracingService)
+    {
+        QueryExpression query = new QueryExpression(entityName);
+        query.ColumnSet = new ColumnSet(fieldName);
+        query.AddOrder(fieldName, OrderType.Descending);
+        query.TopCount = 5000; // Adjust this value based on your expected data volume
+
+        EntityCollection results = service.RetrieveMultiple(query);
+        tracingService.Trace($"ldPlugin: Retrieved {results.Entities.Count} {entityName} records");
+
+        int highestNumber = 0;
+        foreach (var entity in results.Entities)
+        {
+            if (entity.Contains(fieldName))
+            {
+                string existingId = entity.GetAttributeValue<string>(fieldName);
+                if (!string.IsNullOrEmpty(existingId) && existingId.Length > 6)
+                {
+                    if (int.TryParse(existingId.Substring(6), out int number))
+                    {
+                        highestNumber = Math.Max(highestNumber, number);
+                    }
+                }
+            }
+        }
+
+        tracingService.Trace($"ldPlugin: Highest number for {entityName}: {highestNumber}");
+        return highestNumber;
+    }
+}
